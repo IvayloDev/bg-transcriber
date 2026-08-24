@@ -1,0 +1,77 @@
+name: Build Windows app
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install --prefer-binary faster-whisper==1.1.1 "huggingface_hub>=0.27,<1.0" "tqdm>=4.66"
+          # Prebuilt CPU wheel avoids a 10 minute llama.cpp compile; fall back to source.
+          pip install --prefer-binary "llama-cpp-python>=0.3.9" `
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          if ($LASTEXITCODE -ne 0) { pip install "llama-cpp-python>=0.3.9" }
+          pip install pyinstaller==6.11.1
+
+      - name: Smoke test imports
+        run: python -c "import faster_whisper, llama_cpp, huggingface_hub; print(llama_cpp.__version__)"
+
+      - name: Build with PyInstaller
+        run: pyinstaller build/app.spec --noconfirm --distpath dist --workpath build/work
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $v -or $v -notmatch '^\d') { $v = "1.0.0" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" build\installer.iss
+
+      - name: Zip portable build
+        shell: pwsh
+        run: Compress-Archive -Path dist\BGTranscriber\* -DestinationPath dist\BG-Transcriber-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BG-Transcriber-windows
+          path: |
+            dist/BG-Transcriber-Setup.exe
+            dist/BG-Transcriber-portable.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/BG-Transcriber-Setup.exe
+            dist/BG-Transcriber-portable.zip
+          body: |
+            Изтегли `BG-Transcriber-Setup.exe` и го инсталирай.
+
+            При първо пускане приложението сваля моделите веднъж (около 4 GB).
+            След това работи напълно офлайн.
